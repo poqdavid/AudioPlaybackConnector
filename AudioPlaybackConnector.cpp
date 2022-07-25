@@ -9,6 +9,8 @@ void SetupDevicePicker();
 void SetupSvgIcon();
 void UpdateNotifyIcon();
 
+#pragma region // WinMain method
+
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	_In_opt_ HINSTANCE hPrevInstance,
 	_In_ LPWSTR    lpCmdLine,
@@ -17,6 +19,24 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	UNREFERENCED_PARAMETER(hPrevInstance);
 	UNREFERENCED_PARAMETER(lpCmdLine);
 	UNREFERENCED_PARAMETER(nCmdShow);
+
+	CreateMutexA(nullptr, FALSE, "Local\\AudioPlaybackConnector1_3_1_1"); // try to create a named mutex
+	if (GetLastError() == ERROR_ALREADY_EXISTS) // did the mutex already exist?
+	{
+		int btn = 1;
+		TaskDialog(nullptr, nullptr,
+		           _(L"Already running! (TD)"), nullptr,
+		           _(L"AudioPlaybackConnector is already running in background.\r\nCheck Expansion tray menu."),
+		           TDCBF_CANCEL_BUTTON, TD_WARNING_ICON,
+		           &btn);
+		//MessageBoxExW(nullptr
+		//              , _(L"AudioPlaybackConnector is already running in background.\r\nCheck Expansion tray menu.")
+		//              , _(L"Already running! (MB)")
+		//              , MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SERVICE_NOTIFICATION
+		//              , MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL));
+
+		return EXIT_FAILURE;
+	}
 
 	g_hInst = hInstance;
 
@@ -37,7 +57,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	}
 	if (!supported)
 	{
-		TaskDialog(nullptr, nullptr, _(L"Unsupported Operating System"), nullptr, _(L"AudioPlaybackConnector is not supported on this operating system version."), TDCBF_OK_BUTTON, TD_ERROR_ICON, nullptr);
+		TaskDialog(nullptr, nullptr
+		           , _(L"Unsupported Operating System"), nullptr
+		           , _(L"AudioPlaybackConnector is not supported on this operating system version.")
+		           , TDCBF_OK_BUTTON
+		           , TD_ERROR_ICON
+		           , nullptr);
 		return EXIT_FAILURE;
 	}
 
@@ -95,6 +120,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
 	return static_cast<int>(msg.wParam);
 }
+
+#pragma endregion // WinMain method
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
