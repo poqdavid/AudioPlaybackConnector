@@ -27,7 +27,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	{
 		int btn = 1;
 		TaskDialog(nullptr, nullptr,
-		           _(L"Already running! (TD)"), nullptr,
+		           _(L"Already running!"), nullptr,
 		           _(L"AudioPlaybackConnector is already running in background.\r\nCheck Expansion tray menu."),
 		           TDCBF_CANCEL_BUTTON, TD_WARNING_ICON,
 		           &btn);
