@@ -11,7 +11,7 @@ So I write this app, provide a simple, modern and open-source alternative.
 ![Preview](https://cdn.jsdelivr.net/gh/ysc3839/AudioPlaybackConnector@master/AudioPlaybackConnector.gif)
 
 # Usage
-* Download and run AudioPlaybackConnector from [releases](https://github.com/ysc3839/AudioPlaybackConnector/releases).
+* Download and run AudioPlaybackConnector from [releases](https://github.com/dmagician038/AudioPlaybackConnector/releases).
 * Add a bluetooth device in system bluetooth settings. You can right click AudioPlaybackConnector icon in notification area and select "Bluetooth Settings".
 * Click AudioPlaybackConnector icon and select the device you want to connect.
 * Enjoy!
