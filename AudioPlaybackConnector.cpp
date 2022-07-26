@@ -1,10 +1,12 @@
 #include "pch.h"
 #include "AudioPlaybackConnector.h"
 
+#include <ranges>
+
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 void SetupFlyout();
 void SetupMenu();
-winrt::fire_and_forget ConnectDevice(DevicePicker, std::wstring_view);
+winrt::fire_and_forget ConnectDevice(const DevicePicker&, const std::wstring_view&);
 void SetupDevicePicker();
 void SetupSvgIcon();
 void UpdateNotifyIcon();
@@ -128,10 +130,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	switch (message)
 	{
 	case WM_DESTROY:
-		for (const auto& connection : g_audioPlaybackConnections)
+		for (const auto& [first, second] : g_audioPlaybackConnections | std::views::values)
 		{
-			connection.second.second.Close();
-			g_devicePicker.SetDisplayStatus(connection.second.first, {}, DevicePickerDisplayStatusOptions::None);
+			second.Close();
+			g_devicePicker.SetDisplayStatus(first, {}, DevicePickerDisplayStatusOptions::None);
 		}
 		if (g_reconnect)
 		{
@@ -160,9 +162,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		{
 			using namespace winrt::Windows::UI::Popups;
 
-			RECT iconRect;
-			auto hr = Shell_NotifyIconGetRect(&g_niid, &iconRect);
-			if (FAILED(hr))
+			auto iconRect = RECT();
+			if (auto hr = Shell_NotifyIconGetRect(&g_niid, &iconRect); FAILED(hr))
 			{
 				LOG_HR(hr);
 				break;
@@ -280,9 +281,8 @@ void SetupMenu()
 			return;
 		}
 
-		RECT iconRect;
-		auto hr = Shell_NotifyIconGetRect(&g_niid, &iconRect);
-		if (FAILED(hr))
+		auto iconRect = RECT();
+		if (auto hr = Shell_NotifyIconGetRect(&g_niid, &iconRect); FAILED(hr))
 		{
 			LOG_HR(hr);
 			return;
@@ -301,7 +301,7 @@ void SetupMenu()
 	menu.Items().Append(settingsItem);
 	menu.Items().Append(exitItem);
 	menu.Opened([](const auto& sender, const auto&) {
-		auto menuItems = sender.as<MenuFlyout>().Items();
+		auto menuItems = sender.template as<MenuFlyout>().Items();
 		auto itemsCount = menuItems.Size();
 		if (itemsCount > 0)
 		{
@@ -316,7 +316,7 @@ void SetupMenu()
 	g_xamlMenu = menu;
 }
 
-winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation device)
+winrt::fire_and_forget ConnectDevice(const DevicePicker& picker, const DeviceInformation& device)
 {
 	picker.SetDisplayStatus(device, _(L"Connecting"), DevicePickerDisplayStatusOptions::ShowProgress | DevicePickerDisplayStatusOptions::ShowDisconnectButton);
 
@@ -333,8 +333,8 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 			connection.StateChanged([](const auto& sender, const auto&) {
 				if (sender.State() == AudioPlaybackConnectionState::Closed)
 				{
-					auto it = g_audioPlaybackConnections.find(std::wstring(sender.DeviceId()));
-					if (it != g_audioPlaybackConnections.end())
+					if (auto it = g_audioPlaybackConnections.find(std::wstring(sender.DeviceId())); it !=
+						g_audioPlaybackConnections.end())
 					{
 						g_devicePicker.SetDisplayStatus(it->second.first, {}, DevicePickerDisplayStatusOptions::None);
 						g_audioPlaybackConnections.erase(it);
@@ -344,25 +344,31 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 			});
 
 			co_await connection.StartAsync();
-			auto result = co_await connection.OpenAsync();
 
-			switch (result.Status())
+			switch (auto result = co_await connection.OpenAsync(); result.Status())
 			{
 			case AudioPlaybackConnectionOpenResultStatus::Success:
-				success = true;
-				break;
+				{
+					success = true;
+					break;
+				}
 			case AudioPlaybackConnectionOpenResultStatus::RequestTimedOut:
-				success = false;
-				errorMessage = _(L"The request timed out");
-				break;
+				{
+					success = false;
+					errorMessage = _(L"The request timed out");
+					break;
+				}
 			case AudioPlaybackConnectionOpenResultStatus::DeniedBySystem:
-				success = false;
-				errorMessage = _(L"The operation was denied by the system");
-				break;
+				{
+					success = false;
+					errorMessage = _(L"The operation was denied by the system");
+					break;
+				}
 			case AudioPlaybackConnectionOpenResultStatus::UnknownFailure:
-				success = false;
-				winrt::throw_hresult(result.ExtendedError());
-				break;
+				{
+					success = false;
+					throw_hresult(result.ExtendedError());
+				}
 			}
 		}
 		else
@@ -375,10 +381,11 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 	{
 		success = false;
 		errorMessage.resize(64);
-		while (1)
+		while (true)
 		{
-			auto result = swprintf(errorMessage.data(), errorMessage.size(), L"%s (0x%08X)", ex.message().c_str(), static_cast<uint32_t>(ex.code()));
-			if (result < 0)
+			auto code = static_cast<unsigned int>(ex.code());
+			if (auto result = swprintf(errorMessage.data(), errorMessage.size(), L"%s (0x%08X)", ex.message().c_str(),
+			                           code/*ex.code()*/); result < 0)
 			{
 				errorMessage.resize(errorMessage.size() * 2);
 			}
@@ -397,8 +404,8 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 	}
 	else
 	{
-		auto it = g_audioPlaybackConnections.find(std::wstring(device.Id()));
-		if (it != g_audioPlaybackConnections.end())
+		if (auto it = g_audioPlaybackConnections.find(std::wstring(device.Id())); it != g_audioPlaybackConnections.
+			end())
 		{
 			it->second.second.Close();
 			g_audioPlaybackConnections.erase(it);
@@ -407,9 +414,9 @@ winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation devi
 	}
 }
 
-winrt::fire_and_forget ConnectDevice(DevicePicker picker, std::wstring_view deviceId)
+winrt::fire_and_forget ConnectDevice(const DevicePicker& picker, const std::wstring_view& deviceId)
 {
-	auto device = co_await DeviceInformation::CreateFromIdAsync(deviceId);
+	DeviceInformation device = co_await DeviceInformation::CreateFromIdAsync(deviceId);
 	ConnectDevice(picker, device);
 }
 
@@ -427,8 +434,8 @@ void SetupDevicePicker()
 	});
 	g_devicePicker.DisconnectButtonClicked([](const auto& sender, const auto& args) {
 		auto device = args.Device();
-		auto it = g_audioPlaybackConnections.find(std::wstring(device.Id()));
-		if (it != g_audioPlaybackConnections.end())
+		if (auto it = g_audioPlaybackConnections.find(std::wstring(device.Id())); it != g_audioPlaybackConnections.
+			end())
 		{
 			it->second.second.Close();
 			g_audioPlaybackConnections.erase(it);
@@ -448,7 +455,7 @@ void SetupSvgIcon()
 	auto hResData = LoadResource(g_hInst, hRes);
 	FAIL_FAST_LAST_ERROR_IF_NULL(hResData);
 
-	auto svgData = reinterpret_cast<const char*>(LockResource(hResData));
+	auto svgData = static_cast<const char*>(LockResource(hResData));
 	FAIL_FAST_IF_NULL_ALLOC(svgData);
 
 	const std::string_view svg(svgData, size);
