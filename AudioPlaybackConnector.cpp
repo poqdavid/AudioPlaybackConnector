@@ -4,12 +4,288 @@
 #include <ranges>
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
-void SetupFlyout();
-void SetupMenu();
-winrt::fire_and_forget ConnectDevice(const DevicePicker&, const std::wstring_view&);
-void SetupDevicePicker();
-void SetupSvgIcon();
-void UpdateNotifyIcon();
+//void SetupFlyout();
+//void SetupMenu();
+//winrt::fire_and_forget ConnectDevice(DevicePicker, std::wstring_view);
+//void SetupDevicePicker();
+//void SetupSvgIcon();
+//void UpdateNotifyIcon();
+
+//winrt::fire_and_forget ConnectDevice(const DevicePicker& picker, const DeviceInformation& device)
+winrt::fire_and_forget ConnectDevice(DevicePicker picker, DeviceInformation device)
+{
+	picker.SetDisplayStatus(device, _(L"Connecting"),
+	                        DevicePickerDisplayStatusOptions::ShowProgress |
+	                        DevicePickerDisplayStatusOptions::ShowDisconnectButton);
+
+	bool success = true;
+	std::wstring errorMessage;
+
+	try
+	{
+		auto connection = AudioPlaybackConnection::TryCreateFromId(device.Id());
+		if (connection)
+		{
+			g_audioPlaybackConnections.emplace(device.Id(), std::pair(device, connection));
+
+			connection.StateChanged([](const auto& sender, const auto&)
+			{
+				if (sender.State() == AudioPlaybackConnectionState::Closed)
+				{
+					if (auto it = g_audioPlaybackConnections.find(std::wstring(sender.DeviceId())); it !=
+						g_audioPlaybackConnections.end())
+					{
+						g_devicePicker.SetDisplayStatus(it->second.first, {}, DevicePickerDisplayStatusOptions::None);
+						g_audioPlaybackConnections.erase(it);
+					}
+					sender.Close();
+				}
+			});
+
+			co_await connection.StartAsync();
+
+			switch (auto result = co_await connection.OpenAsync(); result.Status())
+			{
+			case AudioPlaybackConnectionOpenResultStatus::Success:
+				{
+					success = true;
+					break;
+				}
+			case AudioPlaybackConnectionOpenResultStatus::RequestTimedOut:
+				{
+					success = false;
+					errorMessage = _(L"The request timed out");
+					break;
+				}
+			case AudioPlaybackConnectionOpenResultStatus::DeniedBySystem:
+				{
+					success = false;
+					errorMessage = _(L"The operation was denied by the system");
+					break;
+				}
+			case AudioPlaybackConnectionOpenResultStatus::UnknownFailure:
+				{
+					success = false;
+					throw_hresult(result.ExtendedError());
+				}
+			}
+		}
+		else
+		{
+			success = false;
+			errorMessage = _(L"Unknown error");
+		}
+	}
+	catch (const winrt::hresult_error& ex)
+	{
+		success = false;
+		errorMessage.resize(64);
+		while (true)
+		{
+			//auto code = static_cast<unsigned int>(ex.code());
+			//if (auto result = swprintf(errorMessage.data(), errorMessage.size(), L"%s (0x%08X)", ex.message().c_str(),
+			//                           code/*ex.code()*/); result < 0)
+			if (auto result = swprintf(errorMessage.data(), errorMessage.size(), L"%s (0x%08X)", ex.message().c_str(),
+			                           ex.code()); result < 0)
+			{
+				errorMessage.resize(errorMessage.size() * 2);
+			}
+			else
+			{
+				errorMessage.resize(result);
+				break;
+			}
+		}
+		LOG_CAUGHT_EXCEPTION();
+	}
+
+	if (success)
+	{
+		picker.SetDisplayStatus(device, _(L"Connected"), DevicePickerDisplayStatusOptions::ShowDisconnectButton);
+	}
+	else
+	{
+		if (auto it = g_audioPlaybackConnections.find(std::wstring(device.Id())); it != g_audioPlaybackConnections.
+			end())
+		{
+			it->second.second.Close();
+			g_audioPlaybackConnections.erase(it);
+		}
+		picker.SetDisplayStatus(device, errorMessage, DevicePickerDisplayStatusOptions::ShowRetryButton);
+	}
+}
+
+//winrt::fire_and_forget ConnectDevice(const DevicePicker& picker, const std::wstring_view& deviceId)
+winrt::fire_and_forget ConnectDevice(DevicePicker picker, std::wstring_view deviceId)
+{
+	DeviceInformation device = co_await DeviceInformation::CreateFromIdAsync(deviceId);
+	ConnectDevice(picker, device);
+}
+
+void SetupFlyout()
+{
+	TextBlock textBlock;
+	textBlock.Text(_(L"All connections will be closed.\nExit anyway?"));
+	textBlock.Margin({0, 0, 0, 12});
+
+	static CheckBox checkbox;
+	checkbox.IsChecked(g_reconnect);
+	checkbox.Content(winrt::box_value(_(L"Reconnect on next start")));
+
+	Button button;
+	button.Content(winrt::box_value(_(L"Exit")));
+	button.HorizontalAlignment(HorizontalAlignment::Right);
+	button.Click([](const auto&, const auto&)
+	{
+		g_reconnect = checkbox.IsChecked().Value();
+		PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
+	});
+
+	StackPanel stackPanel;
+	stackPanel.Children().Append(textBlock);
+	stackPanel.Children().Append(checkbox);
+	stackPanel.Children().Append(button);
+
+	Flyout flyout;
+	flyout.ShouldConstrainToRootBounds(false);
+	flyout.Content(stackPanel);
+
+	g_xamlFlyout = flyout;
+}
+
+void SetupMenu()
+{
+	// https://docs.microsoft.com/en-us/windows/uwp/design/style/segoe-ui-symbol-font
+	FontIcon settingsIcon;
+	settingsIcon.Glyph(L"\xE713");
+
+	MenuFlyoutItem settingsItem;
+	settingsItem.Text(_(L"Bluetooth Settings"));
+	settingsItem.Icon(settingsIcon);
+	settingsItem.Click([](const auto&, const auto&)
+	{
+		winrt::Windows::System::Launcher::LaunchUriAsync(Uri(L"ms-settings:bluetooth"));
+	});
+
+	FontIcon closeIcon;
+	closeIcon.Glyph(L"\xE8BB");
+
+	MenuFlyoutItem exitItem;
+	exitItem.Text(_(L"Exit"));
+	exitItem.Icon(closeIcon);
+	exitItem.Click([](const auto&, const auto&)
+	{
+		if (g_audioPlaybackConnections.size() == 0)
+		{
+			PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
+			return;
+		}
+
+		auto iconRect = RECT();
+		if (auto hr = Shell_NotifyIconGetRect(&g_niid, &iconRect); FAILED(hr))
+		{
+			LOG_HR(hr);
+			return;
+		}
+
+		auto dpi = GetDpiForWindow(g_hWnd);
+
+		SetWindowPos(g_hWnd, HWND_TOPMOST, iconRect.left, iconRect.top, 0, 0, SWP_HIDEWINDOW);
+		g_xamlCanvas.Width(static_cast<float>((iconRect.right - iconRect.left) * USER_DEFAULT_SCREEN_DPI / dpi));
+		g_xamlCanvas.Height(static_cast<float>((iconRect.bottom - iconRect.top) * USER_DEFAULT_SCREEN_DPI / dpi));
+
+		g_xamlFlyout.ShowAt(g_xamlCanvas);
+	});
+
+	MenuFlyout menu;
+	menu.Items().Append(settingsItem);
+	menu.Items().Append(exitItem);
+	menu.Opened([](const auto& sender, const auto&)
+	{
+		auto menuItems = sender.template as<MenuFlyout>().Items();
+		auto itemsCount = menuItems.Size();
+		if (itemsCount > 0)
+		{
+			menuItems.GetAt(itemsCount - 1).Focus(g_menuFocusState);
+		}
+		g_menuFocusState = FocusState::Unfocused;
+	});
+	menu.Closed([](const auto&, const auto&)
+	{
+		ShowWindow(g_hWnd, SW_HIDE);
+	});
+
+	g_xamlMenu = menu;
+}
+
+void SetupDevicePicker()
+{
+	g_devicePicker = DevicePicker();
+	winrt::check_hresult(g_devicePicker.as<IInitializeWithWindow>()->Initialize(g_hWnd));
+
+	g_devicePicker.Filter().SupportedDeviceSelectors().Append(AudioPlaybackConnection::GetDeviceSelector());
+	g_devicePicker.DevicePickerDismissed([](const auto&, const auto&)
+	{
+		SetWindowPos(g_hWnd, nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_HIDEWINDOW);
+	});
+	g_devicePicker.DeviceSelected([](const auto& sender, const auto& args)
+	{
+		ConnectDevice(sender, args.SelectedDevice());
+	});
+	g_devicePicker.DisconnectButtonClicked([](const auto& sender, const auto& args)
+	{
+		auto device = args.Device();
+		if (auto it = g_audioPlaybackConnections.find(std::wstring(device.Id())); it != g_audioPlaybackConnections.
+			end())
+		{
+			it->second.second.Close();
+			g_audioPlaybackConnections.erase(it);
+		}
+		sender.SetDisplayStatus(device, {}, DevicePickerDisplayStatusOptions::None);
+	});
+}
+
+void SetupSvgIcon()
+{
+	auto hRes = FindResourceW(g_hInst, MAKEINTRESOURCEW(1), L"SVG");
+	FAIL_FAST_LAST_ERROR_IF_NULL(hRes);
+
+	auto size = SizeofResource(g_hInst, hRes);
+	FAIL_FAST_LAST_ERROR_IF(size == 0);
+
+	auto hResData = LoadResource(g_hInst, hRes);
+	FAIL_FAST_LAST_ERROR_IF_NULL(hResData);
+
+	auto svgData = static_cast<const char*>(LockResource(hResData));
+	FAIL_FAST_IF_NULL_ALLOC(svgData);
+
+	const std::string_view svg(svgData, size);
+	const int width = GetSystemMetrics(SM_CXSMICON), height = GetSystemMetrics(SM_CYSMICON);
+
+	g_hIconLight = SvgTohIcon(svg, width, height, {0, 0, 0, 1});
+	g_hIconDark = SvgTohIcon(svg, width, height, {1, 1, 1, 1});
+}
+
+void UpdateNotifyIcon()
+{
+	DWORD value = 0, cbValue = sizeof value;
+	LOG_IF_WIN32_ERROR(
+		RegGetValueW(HKEY_CURRENT_USER, LR"(Software\Microsoft\Windows\CurrentVersion\Themes\Personalize)",
+			L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &cbValue));
+	g_nid.hIcon = value != 0 ? g_hIconLight : g_hIconDark;
+
+	if (!Shell_NotifyIconW(NIM_MODIFY, &g_nid))
+	{
+		if (Shell_NotifyIconW(NIM_ADD, &g_nid))
+		{
+			FAIL_FAST_IF_WIN32_BOOL_FALSE(Shell_NotifyIconW(NIM_SETVERSION, &g_nid));
+		}
+		else
+		{
+			LOG_LAST_ERROR();
+		}
+	}
+}
 
 #pragma region // WinMain method
 
@@ -75,8 +351,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 		.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_AUDIOPLAYBACKCONNECTOR)),
 		.hCursor = LoadCursorW(nullptr, IDC_ARROW),
 		.lpszClassName = L"AudioPlaybackConnector",
-		.hIconSm = wcex.hIcon
+		//	.hIconSm = wcex.hIcon
 	};
+
+	wcex.hIconSm = wcex.hIcon;
 
 	RegisterClassExW(&wcex);
 
@@ -225,261 +503,261 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	return 0;
 }
 
-void SetupFlyout()
-{
-	TextBlock textBlock;
-	textBlock.Text(_(L"All connections will be closed.\nExit anyway?"));
-	textBlock.Margin({ 0, 0, 0, 12 });
-
-	static CheckBox checkbox;
-	checkbox.IsChecked(g_reconnect);
-	checkbox.Content(winrt::box_value(_(L"Reconnect on next start")));
-
-	Button button;
-	button.Content(winrt::box_value(_(L"Exit")));
-	button.HorizontalAlignment(HorizontalAlignment::Right);
-	button.Click([](const auto&, const auto&) {
-		g_reconnect = checkbox.IsChecked().Value();
-		PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
-	});
-
-	StackPanel stackPanel;
-	stackPanel.Children().Append(textBlock);
-	stackPanel.Children().Append(checkbox);
-	stackPanel.Children().Append(button);
-
-	Flyout flyout;
-	flyout.ShouldConstrainToRootBounds(false);
-	flyout.Content(stackPanel);
-
-	g_xamlFlyout = flyout;
-}
-
-void SetupMenu()
-{
-	// https://docs.microsoft.com/en-us/windows/uwp/design/style/segoe-ui-symbol-font
-	FontIcon settingsIcon;
-	settingsIcon.Glyph(L"\xE713");
-
-	MenuFlyoutItem settingsItem;
-	settingsItem.Text(_(L"Bluetooth Settings"));
-	settingsItem.Icon(settingsIcon);
-	settingsItem.Click([](const auto&, const auto&) {
-		winrt::Windows::System::Launcher::LaunchUriAsync(Uri(L"ms-settings:bluetooth"));
-	});
-
-	FontIcon closeIcon;
-	closeIcon.Glyph(L"\xE8BB");
-
-	MenuFlyoutItem exitItem;
-	exitItem.Text(_(L"Exit"));
-	exitItem.Icon(closeIcon);
-	exitItem.Click([](const auto&, const auto&) {
-		if (g_audioPlaybackConnections.size() == 0)
-		{
-			PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
-			return;
-		}
-
-		auto iconRect = RECT();
-		if (auto hr = Shell_NotifyIconGetRect(&g_niid, &iconRect); FAILED(hr))
-		{
-			LOG_HR(hr);
-			return;
-		}
-
-		auto dpi = GetDpiForWindow(g_hWnd);
-
-		SetWindowPos(g_hWnd, HWND_TOPMOST, iconRect.left, iconRect.top, 0, 0, SWP_HIDEWINDOW);
-		g_xamlCanvas.Width(static_cast<float>((iconRect.right - iconRect.left) * USER_DEFAULT_SCREEN_DPI / dpi));
-		g_xamlCanvas.Height(static_cast<float>((iconRect.bottom - iconRect.top) * USER_DEFAULT_SCREEN_DPI / dpi));
-
-		g_xamlFlyout.ShowAt(g_xamlCanvas);
-	});
-
-	MenuFlyout menu;
-	menu.Items().Append(settingsItem);
-	menu.Items().Append(exitItem);
-	menu.Opened([](const auto& sender, const auto&) {
-		auto menuItems = sender.template as<MenuFlyout>().Items();
-		auto itemsCount = menuItems.Size();
-		if (itemsCount > 0)
-		{
-			menuItems.GetAt(itemsCount - 1).Focus(g_menuFocusState);
-		}
-		g_menuFocusState = FocusState::Unfocused;
-	});
-	menu.Closed([](const auto&, const auto&) {
-		ShowWindow(g_hWnd, SW_HIDE);
-	});
-
-	g_xamlMenu = menu;
-}
-
-winrt::fire_and_forget ConnectDevice(const DevicePicker& picker, const DeviceInformation& device)
-{
-	picker.SetDisplayStatus(device, _(L"Connecting"), DevicePickerDisplayStatusOptions::ShowProgress | DevicePickerDisplayStatusOptions::ShowDisconnectButton);
-
-	bool success = false;
-	std::wstring errorMessage;
-
-	try
-	{
-		auto connection = AudioPlaybackConnection::TryCreateFromId(device.Id());
-		if (connection)
-		{
-			g_audioPlaybackConnections.emplace(device.Id(), std::pair(device, connection));
-
-			connection.StateChanged([](const auto& sender, const auto&) {
-				if (sender.State() == AudioPlaybackConnectionState::Closed)
-				{
-					if (auto it = g_audioPlaybackConnections.find(std::wstring(sender.DeviceId())); it !=
-						g_audioPlaybackConnections.end())
-					{
-						g_devicePicker.SetDisplayStatus(it->second.first, {}, DevicePickerDisplayStatusOptions::None);
-						g_audioPlaybackConnections.erase(it);
-					}
-					sender.Close();
-				}
-			});
-
-			co_await connection.StartAsync();
-
-			switch (auto result = co_await connection.OpenAsync(); result.Status())
-			{
-			case AudioPlaybackConnectionOpenResultStatus::Success:
-				{
-					success = true;
-					break;
-				}
-			case AudioPlaybackConnectionOpenResultStatus::RequestTimedOut:
-				{
-					success = false;
-					errorMessage = _(L"The request timed out");
-					break;
-				}
-			case AudioPlaybackConnectionOpenResultStatus::DeniedBySystem:
-				{
-					success = false;
-					errorMessage = _(L"The operation was denied by the system");
-					break;
-				}
-			case AudioPlaybackConnectionOpenResultStatus::UnknownFailure:
-				{
-					success = false;
-					throw_hresult(result.ExtendedError());
-				}
-			}
-		}
-		else
-		{
-			success = false;
-			errorMessage = _(L"Unknown error");
-		}
-	}
-	catch (winrt::hresult_error const& ex)
-	{
-		success = false;
-		errorMessage.resize(64);
-		while (true)
-		{
-			auto code = static_cast<unsigned int>(ex.code());
-			if (auto result = swprintf(errorMessage.data(), errorMessage.size(), L"%s (0x%08X)", ex.message().c_str(),
-			                           code/*ex.code()*/); result < 0)
-			{
-				errorMessage.resize(errorMessage.size() * 2);
-			}
-			else
-			{
-				errorMessage.resize(result);
-				break;
-			}
-		}
-		LOG_CAUGHT_EXCEPTION();
-	}
-
-	if (success)
-	{
-		picker.SetDisplayStatus(device, _(L"Connected"), DevicePickerDisplayStatusOptions::ShowDisconnectButton);
-	}
-	else
-	{
-		if (auto it = g_audioPlaybackConnections.find(std::wstring(device.Id())); it != g_audioPlaybackConnections.
-			end())
-		{
-			it->second.second.Close();
-			g_audioPlaybackConnections.erase(it);
-		}
-		picker.SetDisplayStatus(device, errorMessage, DevicePickerDisplayStatusOptions::ShowRetryButton);
-	}
-}
-
-winrt::fire_and_forget ConnectDevice(const DevicePicker& picker, const std::wstring_view& deviceId)
-{
-	DeviceInformation device = co_await DeviceInformation::CreateFromIdAsync(deviceId);
-	ConnectDevice(picker, device);
-}
-
-void SetupDevicePicker()
-{
-	g_devicePicker = DevicePicker();
-	winrt::check_hresult(g_devicePicker.as<IInitializeWithWindow>()->Initialize(g_hWnd));
-
-	g_devicePicker.Filter().SupportedDeviceSelectors().Append(AudioPlaybackConnection::GetDeviceSelector());
-	g_devicePicker.DevicePickerDismissed([](const auto&, const auto&) {
-		SetWindowPos(g_hWnd, nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_HIDEWINDOW);
-	});
-	g_devicePicker.DeviceSelected([](const auto& sender, const auto& args) {
-		ConnectDevice(sender, args.SelectedDevice());
-	});
-	g_devicePicker.DisconnectButtonClicked([](const auto& sender, const auto& args) {
-		auto device = args.Device();
-		if (auto it = g_audioPlaybackConnections.find(std::wstring(device.Id())); it != g_audioPlaybackConnections.
-			end())
-		{
-			it->second.second.Close();
-			g_audioPlaybackConnections.erase(it);
-		}
-		sender.SetDisplayStatus(device, {}, DevicePickerDisplayStatusOptions::None);
-	});
-}
-
-void SetupSvgIcon()
-{
-	auto hRes = FindResourceW(g_hInst, MAKEINTRESOURCEW(1), L"SVG");
-	FAIL_FAST_LAST_ERROR_IF_NULL(hRes);
-
-	auto size = SizeofResource(g_hInst, hRes);
-	FAIL_FAST_LAST_ERROR_IF(size == 0);
-
-	auto hResData = LoadResource(g_hInst, hRes);
-	FAIL_FAST_LAST_ERROR_IF_NULL(hResData);
-
-	auto svgData = static_cast<const char*>(LockResource(hResData));
-	FAIL_FAST_IF_NULL_ALLOC(svgData);
-
-	const std::string_view svg(svgData, size);
-	const int width = GetSystemMetrics(SM_CXSMICON), height = GetSystemMetrics(SM_CYSMICON);
-
-	g_hIconLight = SvgTohIcon(svg, width, height, { 0, 0, 0, 1 });
-	g_hIconDark = SvgTohIcon(svg, width, height, { 1, 1, 1, 1 });
-}
-
-void UpdateNotifyIcon()
-{
-	DWORD value = 0, cbValue = sizeof(value);
-	LOG_IF_WIN32_ERROR(RegGetValueW(HKEY_CURRENT_USER, LR"(Software\Microsoft\Windows\CurrentVersion\Themes\Personalize)", L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &cbValue));
-	g_nid.hIcon = value != 0 ? g_hIconLight : g_hIconDark;
-
-	if (!Shell_NotifyIconW(NIM_MODIFY, &g_nid))
-	{
-		if (Shell_NotifyIconW(NIM_ADD, &g_nid))
-		{
-			FAIL_FAST_IF_WIN32_BOOL_FALSE(Shell_NotifyIconW(NIM_SETVERSION, &g_nid));
-		}
-		else
-		{
-			LOG_LAST_ERROR();
-		}
-	}
-}
+//void SetupFlyout()
+//{
+//	TextBlock textBlock;
+//	textBlock.Text(_(L"All connections will be closed.\nExit anyway?"));
+//	textBlock.Margin({ 0, 0, 0, 12 });
+//
+//	static CheckBox checkbox;
+//	checkbox.IsChecked(g_reconnect);
+//	checkbox.Content(winrt::box_value(_(L"Reconnect on next start")));
+//
+//	Button button;
+//	button.Content(winrt::box_value(_(L"Exit")));
+//	button.HorizontalAlignment(HorizontalAlignment::Right);
+//	button.Click([](const auto&, const auto&) {
+//		g_reconnect = checkbox.IsChecked().Value();
+//		PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
+//	});
+//
+//	StackPanel stackPanel;
+//	stackPanel.Children().Append(textBlock);
+//	stackPanel.Children().Append(checkbox);
+//	stackPanel.Children().Append(button);
+//
+//	Flyout flyout;
+//	flyout.ShouldConstrainToRootBounds(false);
+//	flyout.Content(stackPanel);
+//
+//	g_xamlFlyout = flyout;
+//}
+//
+//void SetupMenu()
+//{
+//	// https://docs.microsoft.com/en-us/windows/uwp/design/style/segoe-ui-symbol-font
+//	FontIcon settingsIcon;
+//	settingsIcon.Glyph(L"\xE713");
+//
+//	MenuFlyoutItem settingsItem;
+//	settingsItem.Text(_(L"Bluetooth Settings"));
+//	settingsItem.Icon(settingsIcon);
+//	settingsItem.Click([](const auto&, const auto&) {
+//		winrt::Windows::System::Launcher::LaunchUriAsync(Uri(L"ms-settings:bluetooth"));
+//	});
+//
+//	FontIcon closeIcon;
+//	closeIcon.Glyph(L"\xE8BB");
+//
+//	MenuFlyoutItem exitItem;
+//	exitItem.Text(_(L"Exit"));
+//	exitItem.Icon(closeIcon);
+//	exitItem.Click([](const auto&, const auto&) {
+//		if (g_audioPlaybackConnections.size() == 0)
+//		{
+//			PostMessageW(g_hWnd, WM_CLOSE, 0, 0);
+//			return;
+//		}
+//
+//		auto iconRect = RECT();
+//		if (auto hr = Shell_NotifyIconGetRect(&g_niid, &iconRect); FAILED(hr))
+//		{
+//			LOG_HR(hr);
+//			return;
+//		}
+//
+//		auto dpi = GetDpiForWindow(g_hWnd);
+//
+//		SetWindowPos(g_hWnd, HWND_TOPMOST, iconRect.left, iconRect.top, 0, 0, SWP_HIDEWINDOW);
+//		g_xamlCanvas.Width(static_cast<float>((iconRect.right - iconRect.left) * USER_DEFAULT_SCREEN_DPI / dpi));
+//		g_xamlCanvas.Height(static_cast<float>((iconRect.bottom - iconRect.top) * USER_DEFAULT_SCREEN_DPI / dpi));
+//
+//		g_xamlFlyout.ShowAt(g_xamlCanvas);
+//	});
+//
+//	MenuFlyout menu;
+//	menu.Items().Append(settingsItem);
+//	menu.Items().Append(exitItem);
+//	menu.Opened([](const auto& sender, const auto&) {
+//		auto menuItems = sender.template as<MenuFlyout>().Items();
+//		auto itemsCount = menuItems.Size();
+//		if (itemsCount > 0)
+//		{
+//			menuItems.GetAt(itemsCount - 1).Focus(g_menuFocusState);
+//		}
+//		g_menuFocusState = FocusState::Unfocused;
+//	});
+//	menu.Closed([](const auto&, const auto&) {
+//		ShowWindow(g_hWnd, SW_HIDE);
+//	});
+//
+//	g_xamlMenu = menu;
+//}
+// 
+//winrt::fire_and_forget ConnectDevice(const DevicePicker& picker, const DeviceInformation& device)
+//{
+//	picker.SetDisplayStatus(device, _(L"Connecting"), DevicePickerDisplayStatusOptions::ShowProgress | DevicePickerDisplayStatusOptions::ShowDisconnectButton);
+//
+//	bool success = false;
+//	std::wstring errorMessage;
+//
+//	try
+//	{
+//		auto connection = AudioPlaybackConnection::TryCreateFromId(device.Id());
+//		if (connection)
+//		{
+//			g_audioPlaybackConnections.emplace(device.Id(), std::pair(device, connection));
+//
+//			connection.StateChanged([](const auto& sender, const auto&) {
+//				if (sender.State() == AudioPlaybackConnectionState::Closed)
+//				{
+//					if (auto it = g_audioPlaybackConnections.find(std::wstring(sender.DeviceId())); it !=
+//						g_audioPlaybackConnections.end())
+//					{
+//						g_devicePicker.SetDisplayStatus(it->second.first, {}, DevicePickerDisplayStatusOptions::None);
+//						g_audioPlaybackConnections.erase(it);
+//					}
+//					sender.Close();
+//				}
+//			});
+//
+//			co_await connection.StartAsync();
+//
+//			switch (auto result = co_await connection.OpenAsync(); result.Status())
+//			{
+//			case AudioPlaybackConnectionOpenResultStatus::Success:
+//				{
+//					success = true;
+//					break;
+//				}
+//			case AudioPlaybackConnectionOpenResultStatus::RequestTimedOut:
+//				{
+//					success = false;
+//					errorMessage = _(L"The request timed out");
+//					break;
+//				}
+//			case AudioPlaybackConnectionOpenResultStatus::DeniedBySystem:
+//				{
+//					success = false;
+//					errorMessage = _(L"The operation was denied by the system");
+//					break;
+//				}
+//			case AudioPlaybackConnectionOpenResultStatus::UnknownFailure:
+//				{
+//					success = false;
+//					throw_hresult(result.ExtendedError());
+//				}
+//			}
+//		}
+//		else
+//		{
+//			success = false;
+//			errorMessage = _(L"Unknown error");
+//		}
+//	}
+//	catch (winrt::hresult_error const& ex)
+//	{
+//		success = false;
+//		errorMessage.resize(64);
+//		while (true)
+//		{
+//			auto code = static_cast<unsigned int>(ex.code());
+//			if (auto result = swprintf(errorMessage.data(), errorMessage.size(), L"%s (0x%08X)", ex.message().c_str(),
+//			                           code/*ex.code()*/); result < 0)
+//			{
+//				errorMessage.resize(errorMessage.size() * 2);
+//			}
+//			else
+//			{
+//				errorMessage.resize(result);
+//				break;
+//			}
+//		}
+//		LOG_CAUGHT_EXCEPTION();
+//	}
+//
+//	if (success)
+//	{
+//		picker.SetDisplayStatus(device, _(L"Connected"), DevicePickerDisplayStatusOptions::ShowDisconnectButton);
+//	}
+//	else
+//	{
+//		if (auto it = g_audioPlaybackConnections.find(std::wstring(device.Id())); it != g_audioPlaybackConnections.
+//			end())
+//		{
+//			it->second.second.Close();
+//			g_audioPlaybackConnections.erase(it);
+//		}
+//		picker.SetDisplayStatus(device, errorMessage, DevicePickerDisplayStatusOptions::ShowRetryButton);
+//	}
+//}
+//
+//winrt::fire_and_forget ConnectDevice(const DevicePicker& picker, const std::wstring_view& deviceId)
+//{
+//	DeviceInformation device = co_await DeviceInformation::CreateFromIdAsync(deviceId);
+//	ConnectDevice(picker, device);
+//}
+//
+//void SetupDevicePicker()
+//{
+//	g_devicePicker = DevicePicker();
+//	winrt::check_hresult(g_devicePicker.as<IInitializeWithWindow>()->Initialize(g_hWnd));
+//
+//	g_devicePicker.Filter().SupportedDeviceSelectors().Append(AudioPlaybackConnection::GetDeviceSelector());
+//	g_devicePicker.DevicePickerDismissed([](const auto&, const auto&) {
+//		SetWindowPos(g_hWnd, nullptr, 0, 0, 0, 0, SWP_NOZORDER | SWP_HIDEWINDOW);
+//	});
+//	g_devicePicker.DeviceSelected([](const auto& sender, const auto& args) {
+//		ConnectDevice(sender, args.SelectedDevice());
+//	});
+//	g_devicePicker.DisconnectButtonClicked([](const auto& sender, const auto& args) {
+//		auto device = args.Device();
+//		if (auto it = g_audioPlaybackConnections.find(std::wstring(device.Id())); it != g_audioPlaybackConnections.
+//			end())
+//		{
+//			it->second.second.Close();
+//			g_audioPlaybackConnections.erase(it);
+//		}
+//		sender.SetDisplayStatus(device, {}, DevicePickerDisplayStatusOptions::None);
+//	});
+//}
+//
+//void SetupSvgIcon()
+//{
+//	auto hRes = FindResourceW(g_hInst, MAKEINTRESOURCEW(1), L"SVG");
+//	FAIL_FAST_LAST_ERROR_IF_NULL(hRes);
+//
+//	auto size = SizeofResource(g_hInst, hRes);
+//	FAIL_FAST_LAST_ERROR_IF(size == 0);
+//
+//	auto hResData = LoadResource(g_hInst, hRes);
+//	FAIL_FAST_LAST_ERROR_IF_NULL(hResData);
+//
+//	auto svgData = static_cast<const char*>(LockResource(hResData));
+//	FAIL_FAST_IF_NULL_ALLOC(svgData);
+//
+//	const std::string_view svg(svgData, size);
+//	const int width = GetSystemMetrics(SM_CXSMICON), height = GetSystemMetrics(SM_CYSMICON);
+//
+//	g_hIconLight = SvgTohIcon(svg, width, height, { 0, 0, 0, 1 });
+//	g_hIconDark = SvgTohIcon(svg, width, height, { 1, 1, 1, 1 });
+//}
+//
+//void UpdateNotifyIcon()
+//{
+//	DWORD value = 0, cbValue = sizeof(value);
+//	LOG_IF_WIN32_ERROR(RegGetValueW(HKEY_CURRENT_USER, LR"(Software\Microsoft\Windows\CurrentVersion\Themes\Personalize)", L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &cbValue));
+//	g_nid.hIcon = value != 0 ? g_hIconLight : g_hIconDark;
+//
+//	if (!Shell_NotifyIconW(NIM_MODIFY, &g_nid))
+//	{
+//		if (Shell_NotifyIconW(NIM_ADD, &g_nid))
+//		{
+//			FAIL_FAST_IF_WIN32_BOOL_FALSE(Shell_NotifyIconW(NIM_SETVERSION, &g_nid));
+//		}
+//		else
+//		{
+//			LOG_LAST_ERROR();
+//		}
+//	}
+//}
