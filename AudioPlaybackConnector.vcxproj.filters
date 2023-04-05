@@ -59,6 +59,7 @@
     </Image>
   </ItemGroup>
   <ItemGroup>
+    <None Include="AudioPlaybackConnector.svg" />
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup>

@@ -1,15 +1,16 @@
 #pragma once
+#include <ranges>
 
 constexpr auto CONFIG_NAME = L"AudioPlaybackConnector.json";
 constexpr auto BUFFER_SIZE = 4096;
 
-void DefaultSettings()
+inline void DefaultSettings()
 {
 	g_reconnect = false;
 	g_lastDevices.clear();
 }
 
-void LoadSettings()
+inline void LoadSettings()
 {
 	try
 	{
@@ -19,7 +20,7 @@ void LoadSettings()
 		THROW_LAST_ERROR_IF(!hFile);
 
 		std::string string;
-		while (1)
+		while (true)
 		{
 			size_t size = string.size();
 			string.resize(size + BUFFER_SIZE);
@@ -45,7 +46,7 @@ void LoadSettings()
 	CATCH_LOG();
 }
 
-void SaveSettings()
+inline void SaveSettings()
 {
 	try
 	{
@@ -53,11 +54,11 @@ void SaveSettings()
 		jsonObj.Insert(L"reconnect", JsonValue::CreateBooleanValue(g_reconnect));
 
 		JsonArray lastDevices;
-		for (const auto& i : g_audioPlaybackConnections)
+		for (const auto& key : g_audioPlaybackConnections | std::views::keys)
 		{
-			lastDevices.Append(JsonValue::CreateStringValue(i.first));
+			lastDevices.Append(JsonValue::CreateStringValue(key));
 		}
-		jsonObj.Insert(L"lastDevices", lastDevices);
+		auto t = jsonObj.Insert(L"lastDevices", lastDevices);
 
 		wil::unique_hfile hFile(CreateFileW((GetModuleFsPath(g_hInst).remove_filename() / CONFIG_NAME).c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
 		THROW_LAST_ERROR_IF(!hFile);
@@ -66,6 +67,7 @@ void SaveSettings()
 		DWORD written = 0;
 		THROW_IF_WIN32_BOOL_FALSE(WriteFile(hFile.get(), utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr));
 		THROW_HR_IF(E_FAIL, written != utf8.size());
+		t = !t;
 	}
 	CATCH_LOG();
 }
