@@ -36,6 +36,12 @@
     <ClInclude Include="Direct2DSvg.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="I18n.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="FnvHash.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AudioPlaybackConnector.cpp">
@@ -66,5 +72,8 @@
     <Manifest Include="AudioPlaybackConnector.manifest">
       <Filter>Resource Files</Filter>
     </Manifest>
+  </ItemGroup>
+  <ItemGroup>
+    <Natvis Include="$(MSBuildThisFileDirectory)..\..\natvis\wil.natvis" />
   </ItemGroup>
 </Project>
